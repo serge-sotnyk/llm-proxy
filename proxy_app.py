@@ -79,43 +79,32 @@ key_manager = APIKeyManager(API_KEYS, RATE_LIMIT)
 # Create FastAPI instance
 app = FastAPI(title="Proxy API Gateway")
 
-@app.post("/proxy")
-@app.get("/proxy")
-@app.put("/proxy")
-@app.delete("/proxy")
-@app.patch("/proxy")
-async def proxy(request: Request):
-    """
-    Handler for incoming requests.
-    Forwards the request to the target API with the API key substitution, rotates keys,
-    and monitors request limit exceedance.
-    """
-    # Get an available API key according to the round-robin and rate limiting algorithm
+@app.api_route("/proxy/{full_path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
+async def proxy(full_path: str, request: Request):
+    # Get API key and form headers
     api_key = await key_manager.get_available_key()
-
-    # Form request headers, adding the API key (in this case, in the Authorization field)
     headers = dict(request.headers)
     headers["Authorization"] = f"Bearer {api_key}"
 
-    # Read the request body if present
+    # Read request body
     body = await request.body()
+
+    # Form target API URL by adding the nested path
+    target_url = f"{TARGET_API_URL}/{full_path}"
 
     async with httpx.AsyncClient() as client:
         try:
-            # Send the request to the target API using the same HTTP method, passing headers, parameters, and request body
             response = await client.request(
                 method=request.method,
-                url=TARGET_API_URL,
+                url=target_url,
                 headers=headers,
                 params=dict(request.query_params),
                 content=body,
                 timeout=10.0
             )
         except httpx.RequestError as exc:
-            # Handle errors when requesting the target API; even failed requests are counted in the limit
             raise HTTPException(status_code=502, detail=f"Error contacting the target API: {exc}") from exc
 
-    # Return the response to the client, preserving the status code and response body
     return Response(content=response.content, status_code=response.status_code, headers=response.headers)
 
 # Example of running the service:
