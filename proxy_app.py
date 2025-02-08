@@ -4,52 +4,62 @@ import httpx
 from fastapi import FastAPI, Request, HTTPException, Response
 from typing import List
 
-# Конфигурация приложения и целевого API
-# Список API-ключей, которые будут использоваться по схеме round-robin
-API_KEYS = ["your_api_key1", "your_api_key2", "your_api_key3"]
-# Лимит запросов для каждого API-ключа (15 запросов в минуту)
-RATE_LIMIT = 15
-# URL целевого API (например, API Google Gemini или другой API)
-TARGET_API_URL = "https://api.example.com/endpoint"
+# Load environment variables from .env file
+from dotenv import load_dotenv
+load_dotenv()
+
+import os
+import sys
+
+# Load configuration from .env file
+API_KEYS = os.getenv("API_KEYS")
+if not API_KEYS:
+    sys.exit("Error: API_KEYS environment variable not set in .env. Please provide at least one API key separated by ';'.")
+API_KEYS = API_KEYS.split(";")  # Expect semicolon-separated API keys
+
+RATE_LIMIT = int(os.getenv("RATE_LIMIT", "15"))
+TARGET_API_URL = os.getenv("TARGET_API_URL")
+if not TARGET_API_URL:
+    sys.exit("Error: TARGET_API_URL environment variable not set in .env. Please provide the target API URL.")
 
 class APIKeyManager:
     """
-    Класс для управления API-ключами с механизмом round-robin и ограничением запросов (rate limiting).
-    Для каждого ключа в памяти ведется статистика: количество запросов и время начала текущего окна.
+    Class for managing API keys with a round-robin mechanism and rate limiting.
+    For each key, statistics are kept in memory: the number of requests and the start time of the current window.
     """
     def __init__(self, api_keys: List[str], rate_limit: int, window: int = 60):
         self.api_keys = api_keys
         self.rate_limit = rate_limit
-        self.window = window  # Интервал окна в секундах (60 секунд = 1 минута)
+        self.window = window  # Window interval in seconds (60 seconds = 1 minute)
         self.lock = asyncio.Lock()
-        # Инициализируем для каждого ключа счетчик и время начала окна
+        # Initialize counter and window start time for each key
         self.stats = {key: {"count": 0, "window_start": time.time()} for key in api_keys}
-        self.index = 0  # Текущий индекс для round-robin
+        self.index = 0  # Current index for round-robin
 
     async def get_available_key(self) -> str:
         """
-        Возвращает доступный API-ключ, который не превысил лимит запросов.
-        Если лимит для выбранного ключа исчерпан, пробует следующие.
-        Если все ключи исчерпаны, ожидает окончания минимального времени ожидания.
+        Returns an available API key that has not exceeded the request limit.
+        If the limit for the selected key is exhausted, tries the next ones.
+        If all keys are exhausted, waits for the minimum wait time to expire.
         """
         async with self.lock:
             for _ in range(len(self.api_keys)):
                 key = self.api_keys[self.index]
                 stat = self.stats[key]
                 current_time = time.time()
-                # Если время текущего окна истекло, сбрасываем счетчик и обновляем время окна
+                # If the current window time has expired, reset the counter and update the window time
                 if current_time - stat["window_start"] >= self.window:
                     stat["count"] = 0
                     stat["window_start"] = current_time
-                # Если лимит еще не исчерпан, используем этот ключ
+                # If the limit is not yet exhausted, use this key
                 if stat["count"] < self.rate_limit:
                     stat["count"] += 1
-                    # Обновляем индекс для round-robin
+                    # Update index for round-robin
                     self.index = (self.index + 1) % len(self.api_keys)
                     return key
-                # Переходим к следующему ключу
+                # Move to the next key
                 self.index = (self.index + 1) % len(self.api_keys)
-            # Если все ключи исчерпаны, вычисляем минимальное время ожидания для сброса лимита
+            # If all keys are exhausted, calculate the minimum wait time for the limit reset
             wait_times = []
             current_time = time.time()
             for key in self.api_keys:
@@ -59,14 +69,14 @@ class APIKeyManager:
                     wait_time = 0
                 wait_times.append(wait_time)
             min_wait = min(wait_times)
-        # Ждем необходимое минимальное время и повторяем попытку
+        # Wait for the required minimum time and retry
         await asyncio.sleep(min_wait)
         return await self.get_available_key()
 
-# Инициализируем менеджер API-ключей
+# Initialize API key manager
 key_manager = APIKeyManager(API_KEYS, RATE_LIMIT)
 
-# Создаем экземпляр FastAPI
+# Create FastAPI instance
 app = FastAPI(title="Proxy API Gateway")
 
 @app.post("/proxy")
@@ -76,23 +86,23 @@ app = FastAPI(title="Proxy API Gateway")
 @app.patch("/proxy")
 async def proxy(request: Request):
     """
-    Обработчик входящих запросов.
-    Перенаправляет запрос к целевому API с подстановкой API-ключа, осуществляет ротацию ключей
-    и следит за превышением лимита запросов.
+    Handler for incoming requests.
+    Forwards the request to the target API with the API key substitution, rotates keys,
+    and monitors request limit exceedance.
     """
-    # Получаем доступный API-ключ согласно алгоритму round-robin и rate limiting
+    # Get an available API key according to the round-robin and rate limiting algorithm
     api_key = await key_manager.get_available_key()
 
-    # Формируем заголовки запроса, добавляя API-ключ (в данном случае в поле Authorization)
+    # Form request headers, adding the API key (in this case, in the Authorization field)
     headers = dict(request.headers)
     headers["Authorization"] = f"Bearer {api_key}"
 
-    # Читаем тело запроса, если оно присутствует
+    # Read the request body if present
     body = await request.body()
 
     async with httpx.AsyncClient() as client:
         try:
-            # Отправляем запрос к целевому API, используя тот же HTTP-метод, передавая заголовки, параметры и тело запроса
+            # Send the request to the target API using the same HTTP method, passing headers, parameters, and request body
             response = await client.request(
                 method=request.method,
                 url=TARGET_API_URL,
@@ -102,13 +112,13 @@ async def proxy(request: Request):
                 timeout=10.0
             )
         except httpx.RequestError as exc:
-            # Обработка ошибок при запросе к целевому API; даже неудачные запросы учитываются в лимите
-            raise HTTPException(status_code=502, detail=f"Ошибка при обращении к целевому API: {exc}") from exc
+            # Handle errors when requesting the target API; even failed requests are counted in the limit
+            raise HTTPException(status_code=502, detail=f"Error contacting the target API: {exc}") from exc
 
-    # Возвращаем ответ клиенту, сохраняя статус-код и тело ответа
+    # Return the response to the client, preserving the status code and response body
     return Response(content=response.content, status_code=response.status_code, headers=response.headers)
 
-# Пример запуска сервиса:
+# Example of running the service:
 # uvicorn proxy_app:app --host 0.0.0.0 --port 8000
 
 if __name__ == "__main__":
