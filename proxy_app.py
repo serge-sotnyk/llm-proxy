@@ -100,7 +100,7 @@ async def proxy(full_path: str, request: Request):
                 headers=headers,
                 params=dict(request.query_params),
                 content=body,
-                timeout=10.0
+                timeout=180.0
             )
         except httpx.RequestError as exc:
             raise HTTPException(status_code=502, detail=f"Error contacting the target API: {exc}") from exc
