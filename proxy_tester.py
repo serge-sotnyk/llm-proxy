@@ -41,7 +41,7 @@ async def main():
     await test_api(direct_url, api_key)
 
     # Test call through the local proxy
-    proxy_url = "http://127.0.0.1:8000"
+    proxy_url = "http://127.0.0.1:8000/proxy/"
     await test_api(proxy_url, api_key)
 
 

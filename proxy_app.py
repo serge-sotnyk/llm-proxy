@@ -1,8 +1,9 @@
 import asyncio
 import time
+from urllib.parse import urljoin
+
 import httpx
 from fastapi import FastAPI, Request, HTTPException, Response
-from typing import List
 
 # Load environment variables from .env file
 from dotenv import load_dotenv
@@ -27,7 +28,7 @@ class APIKeyManager:
     Class for managing API keys with a round-robin mechanism and rate limiting.
     For each key, statistics are kept in memory: the number of requests and the start time of the current window.
     """
-    def __init__(self, api_keys: List[str], rate_limit: int, window: int = 60):
+    def __init__(self, api_keys: list[str], rate_limit: int, window: int = 60):
         self.api_keys = api_keys
         self.rate_limit = rate_limit
         self.window = window  # Window interval in seconds (60 seconds = 1 minute)
@@ -84,13 +85,15 @@ async def proxy(full_path: str, request: Request):
     # Get API key and form headers
     api_key = await key_manager.get_available_key()
     headers = dict(request.headers)
+    headers.pop("host", None)
     headers["Authorization"] = f"Bearer {api_key}"
 
     # Read request body
     body = await request.body()
 
     # Form target API URL by adding the nested path
-    target_url = f"{TARGET_API_URL}/{full_path}"
+    target_url = urljoin(TARGET_API_URL, full_path)
+    print(f"Proxying request to {target_url}")
 
     async with httpx.AsyncClient() as client:
         try:
@@ -105,7 +108,23 @@ async def proxy(full_path: str, request: Request):
         except httpx.RequestError as exc:
             raise HTTPException(status_code=502, detail=f"Error contacting the target API: {exc}") from exc
 
-    return Response(content=response.content, status_code=response.status_code, headers=response.headers)
+    hop_by_hop = {
+        "connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+        "content-encoding",
+    }
+    filtered_headers = {
+        k: v
+        for k, v in response.headers.items()
+        if k.lower() not in hop_by_hop
+    }
+    return Response(content=response.content, status_code=response.status_code, headers=filtered_headers)
 
 # Example of running the service:
 # uvicorn proxy_app:app --host 0.0.0.0 --port 8000
